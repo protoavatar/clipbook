@@ -3,6 +3,12 @@
 # Captures the current clipboard as a JSON entry on stdout. In watch mode,
 # wl-paste invokes this with the payload on stdin and the mime as $1. Without
 # arguments, it snapshots the current selection itself.
+#
+# Everything is bounded. Text and image payloads over the limits below are
+# dropped, and every wl-paste call has a hard timeout, so a clipboard owner
+# cannot make the long-lived watcher buffer unbounded memory or write unbounded
+# files. Limits are enforced while streaming, before the payload is fully read:
+# `head -c` stops the writer with SIGPIPE once the cap is reached.
 
 set -o pipefail
 
@@ -10,7 +16,11 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 IMAGE_DIR="$STATE_DIR/clipboard-images"
 mkdir -p "$IMAGE_DIR"
 
-types=$(wl-paste --list-types 2>/dev/null || true)
+MAX_TEXT_BYTES="${CLIPBOOK_MAX_TEXT_BYTES:-262144}"      # 256 KiB
+MAX_IMAGE_BYTES="${CLIPBOOK_MAX_IMAGE_BYTES:-16777216}"  # 16 MiB
+WL_TIMEOUT="${CLIPBOOK_WL_TIMEOUT:-3}"                   # seconds per wl-paste call
+
+types=$(timeout "$WL_TIMEOUT" wl-paste --list-types 2>/dev/null || true)
 
 if [[ ${CLIPBOARD_STATE:-} == "sensitive" ]] || grep -qx 'x-kde-passwordManagerHint' <<<"$types"; then
   exit 0
@@ -18,14 +28,16 @@ fi
 
 emit_image() {
   local mime="$1"
-  local ext tmp hash file
+  local ext tmp hash file size
 
   ext=${mime#image/}
   [[ $ext == jpeg ]] && ext=jpg
 
   tmp=$(mktemp --tmpdir="$IMAGE_DIR" clipboard.XXXXXX) || return 0
-  cat >"$tmp"
-  if [[ ! -s $tmp ]]; then
+  # Read at most limit+1 bytes; the writer is stopped once the cap is reached.
+  head -c "$((MAX_IMAGE_BYTES + 1))" >"$tmp" 2>/dev/null
+  size=$(wc -c <"$tmp" | tr -d ' ')
+  if ((size == 0)) || ((size > MAX_IMAGE_BYTES)); then
     rm -f "$tmp"
     return 0
   fi
@@ -43,9 +55,12 @@ emit_image() {
 }
 
 emit_text() {
-  perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -0777 -e '
+  # Bounded read: head stops at limit+1 bytes, Perl drops anything above the
+  # limit, so the payload is never fully buffered.
+  head -c "$((MAX_TEXT_BYTES + 1))" | MAX_TEXT_BYTES="$MAX_TEXT_BYTES" perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -0777 -e '
     my $raw = <STDIN>;
     exit unless length $raw;
+    exit if length($raw) > $ENV{MAX_TEXT_BYTES};
 
     my $encoding;
     my $heuristic_encoding = 0;
@@ -96,11 +111,11 @@ esac
 
 for mime in image/png image/jpeg image/webp image/gif image/bmp image/tiff; do
   if grep -qx "$mime" <<<"$types"; then
-    timeout 2s wl-paste --type "$mime" 2>/dev/null | emit_image "$mime"
+    timeout "$WL_TIMEOUT" wl-paste --type "$mime" 2>/dev/null | emit_image "$mime"
     exit 0
   fi
 done
 
 if grep -q '^text/' <<<"$types" || grep -qx 'UTF8_STRING' <<<"$types" || grep -qx 'STRING' <<<"$types"; then
-  wl-paste --type text --no-newline 2>/dev/null | emit_text
+  timeout "$WL_TIMEOUT" wl-paste --type text --no-newline 2>/dev/null | emit_text
 fi

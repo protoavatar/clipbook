@@ -18,7 +18,10 @@ Item {
   property var history: []
 
   property string historyPath: Quickshell.env("HOME") + "/.local/state/omarchy/clipboard-history.json"
-  property string captureScript: root.omarchyPath + "/shell/plugins/clipboard/capture.sh"
+  // Use this plugin's own capture script (resolved relative to this QML file)
+  // instead of the packaged one, so the bounded capture path shipped here is
+  // the one that runs.
+  property string captureScript: String(Qt.resolvedUrl("capture.sh")).replace(/^file:\/\//, "")
   // Shares the [menu] surface tokens — themes that style the menu also
   // style the clipboard. Selected-row colors composed in the
   // singleton so consumers drop them straight into Rectangle bindings.
@@ -630,7 +633,7 @@ Item {
   // the shell exits, however it exits, so no further lifecycle management.
   Process {
     id: initProc
-    command: ["pkill", "-f", "wl-paste .*--watch .*/shell/plugins/clipboard/capture\\.sh"]
+    command: ["pkill", "-f", "wl-paste .*--watch .*clipbook/capture\\.sh"]
     onExited: {
       currentProc.running = true
       textWatchProc.running = true

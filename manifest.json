@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "protoavatar.clipbook",
   "name": "Clipbook",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "protoavatar",
   "license": "MIT",
   "description": "Clipboard manager with pinned entries, quick notes, annotations, and inline editing.",
