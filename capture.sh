@@ -4,11 +4,15 @@
 # wl-paste invokes this with the payload on stdin and the mime as $1. Without
 # arguments, it snapshots the current selection itself.
 #
-# Everything is bounded. Text and image payloads over the limits below are
-# dropped, and every wl-paste call has a hard timeout, so a clipboard owner
-# cannot make the long-lived watcher buffer unbounded memory or write unbounded
-# files. Limits are enforced while streaming, before the payload is fully read:
-# `head -c` stops the writer with SIGPIPE once the cap is reached.
+# Everything is bounded, and both byte ceilings and deadlines are applied while
+# streaming, before a payload is fully read:
+#   - every wl-paste call runs under a hard timeout;
+#   - the MIME list is byte-capped before it can be stored in a variable;
+#   - each stdin read (watch mode included) has a per-transfer deadline;
+#   - oversize, timed-out and partial transfers are dropped and any temporary
+#     file is removed.
+# A clipboard owner therefore cannot exhaust memory or disk, nor hold the
+# watcher or the capture child open indefinitely.
 
 set -o pipefail
 
@@ -18,26 +22,41 @@ mkdir -p "$IMAGE_DIR"
 
 MAX_TEXT_BYTES="${CLIPBOOK_MAX_TEXT_BYTES:-262144}"      # 256 KiB
 MAX_IMAGE_BYTES="${CLIPBOOK_MAX_IMAGE_BYTES:-16777216}"  # 16 MiB
+MAX_MIME_BYTES="${CLIPBOOK_MAX_MIME_BYTES:-65536}"       # 64 KiB
 WL_TIMEOUT="${CLIPBOOK_WL_TIMEOUT:-3}"                   # seconds per wl-paste call
+READ_TIMEOUT="${CLIPBOOK_READ_TIMEOUT:-5}"               # seconds per payload read
 
-types=$(timeout "$WL_TIMEOUT" wl-paste --list-types 2>/dev/null || true)
+# Byte-capped before command substitution so a huge MIME list cannot be stored.
+types=$(timeout "$WL_TIMEOUT" wl-paste --list-types 2>/dev/null | head -c "$MAX_MIME_BYTES" || true)
 
 if [[ ${CLIPBOARD_STATE:-} == "sensitive" ]] || grep -qx 'x-kde-passwordManagerHint' <<<"$types"; then
   exit 0
 fi
 
+# Read stdin into $1 under a deadline, at most $2+1 bytes. Returns 0 when a
+# complete payload within the limit was read, non-zero otherwise. The writer is
+# stopped with SIGPIPE once the cap is reached; a stalled writer is killed by
+# the deadline.
+read_payload() {
+  local out="$1" limit="$2" rc
+  timeout "$READ_TIMEOUT" head -c "$((limit + 1))" >"$out" 2>/dev/null
+  rc=$?
+  [[ $rc -ne 0 ]] && return 1
+  local size
+  size=$(wc -c <"$out" | tr -d ' ')
+  ((size == 0)) || ((size > limit)) && return 1
+  return 0
+}
+
 emit_image() {
   local mime="$1"
-  local ext tmp hash file size
+  local ext tmp hash file
 
   ext=${mime#image/}
   [[ $ext == jpeg ]] && ext=jpg
 
   tmp=$(mktemp --tmpdir="$IMAGE_DIR" clipboard.XXXXXX) || return 0
-  # Read at most limit+1 bytes; the writer is stopped once the cap is reached.
-  head -c "$((MAX_IMAGE_BYTES + 1))" >"$tmp" 2>/dev/null
-  size=$(wc -c <"$tmp" | tr -d ' ')
-  if ((size == 0)) || ((size > MAX_IMAGE_BYTES)); then
+  if ! read_payload "$tmp" "$MAX_IMAGE_BYTES"; then
     rm -f "$tmp"
     return 0
   fi
@@ -55,9 +74,14 @@ emit_image() {
 }
 
 emit_text() {
-  # Bounded read: head stops at limit+1 bytes, Perl drops anything above the
-  # limit, so the payload is never fully buffered.
-  head -c "$((MAX_TEXT_BYTES + 1))" | MAX_TEXT_BYTES="$MAX_TEXT_BYTES" perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -0777 -e '
+  local tmp rc
+  tmp=$(mktemp) || return 0
+  if ! read_payload "$tmp" "$MAX_TEXT_BYTES"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  MAX_TEXT_BYTES="$MAX_TEXT_BYTES" perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -0777 -e '
     my $raw = <STDIN>;
     exit unless length $raw;
     exit if length($raw) > $ENV{MAX_TEXT_BYTES};
@@ -101,7 +125,10 @@ emit_text() {
     }
     $text = decode("UTF-8", $raw) unless defined $text;
     print "{\"type\":\"text\",\"text\":", encode_json($text), "}\n";
-  '
+  ' <"$tmp"
+  rc=$?
+  rm -f "$tmp"
+  return $rc
 }
 
 case "${1:-}" in
