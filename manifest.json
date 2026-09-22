@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "protoavatar.clipbook",
+  "name": "Clipbook",
+  "version": "0.1.0",
+  "author": "protoavatar",
+  "license": "MIT",
+  "description": "Clipboard manager with pinned entries, quick notes, annotations, and inline editing.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Clipboard.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.clipboard"
+  }
+}
