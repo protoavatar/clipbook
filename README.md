@@ -43,12 +43,13 @@ Open with `Super+Ctrl+V` (or `omarchy menu clipboard`).
 | `Ctrl+N` | new note |
 | `Ctrl+E` / `F2` | edit inline |
 | `Ctrl+M` | annotate |
+| `Ctrl+L` | type an image's file path into the focused window (useful when handing an image to a coding agent or a tool that cannot accept images directly) |
 | `Del` | delete entry |
 | `Shift+Del` | clear history |
 | `Esc` | close |
 
-In the inline editor: `Enter` saves, `Shift+Enter` inserts a newline, `Ctrl+V`
-pastes the live clipboard, `Esc` cancels.
+In the inline editor: `Enter` saves, `Shift+Enter` (or `Ctrl+Enter`) inserts a
+newline, `Ctrl+V` pastes the live clipboard, `Esc` cancels.
 
 ## Configuration
 
@@ -85,7 +86,7 @@ Clipbook shares Omarchy's clipboard history at
 `clipboard-history.json.bak` keeps the previous state and is used to recover
 from a corrupt main file.
 
-Capture uses Omarchy's own `capture.sh`, which already skips entries flagged by
+Capture uses Clipbook's own bounded `capture.sh`, which skips entries flagged by
 password managers.
 
 ## Remove
@@ -100,6 +101,8 @@ omarchy plugin remove protoavatar.clipbook
 - **Omarchy Quattro** (the `omarchy-shell` / Quickshell era).
 - `wl-copy` / `wl-paste` — part of the default Omarchy set; used for capture and
   paste.
+- `wtype` — types text into the focused window; used by `Ctrl+L` to hand an image
+  path to an agent. Ships with Omarchy.
 - `bash` — the plugin runs small shell helpers (`mkdir`, `cmp`, `cat`) for image
   editing.
 - `tensaku` (`tensaku-edit`) — image editor, used by `Alt+Enter` on an image.
@@ -121,7 +124,7 @@ Clipbook keeps everything on your machine, like the built-in manager:
 - **Same storage as the built-in.** History lives in
   `~/.local/state/omarchy/clipboard-history.json` and images in
   `~/.local/state/omarchy/clipboard-images/`. Nothing leaves those files.
-- **Password managers are already filtered.** Capture runs Omarchy's own
+- **Password managers are already filtered.** Capture runs Clipbook's bounded
   `capture.sh`, which skips entries marked `x-kde-passwordManagerHint` or copied
   while `CLIPBOARD_STATE=sensitive`.
 - **Remote images in notes are stripped** before rendering, so Qt's rich-text

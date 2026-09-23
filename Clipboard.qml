@@ -21,7 +21,18 @@ Item {
   // Use this plugin's own capture script (resolved relative to this QML file)
   // instead of the packaged one, so the bounded capture path shipped here is
   // the one that runs.
-  property string captureScript: String(Qt.resolvedUrl("capture.sh")).replace(/^file:\/\//, "")
+  // Resolve capture.sh next to this QML file. Qt.resolvedUrl yields a
+  // percent-encoded file:// URL; decode it so install paths with spaces work,
+  // but never let a malformed sequence throw and break the binding.
+  function filePathFromUrl(url) {
+    var raw = String(url || "").replace(/^file:\/\//, "")
+    try {
+      return decodeURIComponent(raw)
+    } catch (e) {
+      return raw
+    }
+  }
+  property string captureScript: root.filePathFromUrl(Qt.resolvedUrl("capture.sh"))
   // Shares the [menu] surface tokens — themes that style the menu also
   // style the clipboard. Selected-row colors composed in the
   // singleton so consumers drop them straight into Rectangle bindings.
@@ -41,6 +52,10 @@ Item {
   property int cardHeight: Math.min(Style.space(600), panel.height - Style.gapsOut * 2)
   property int rowHeight: Math.max(Style.space(50), Style.font.body + Style.font.caption + Style.spacing.rowPaddingX * 2)
   property int displayRevision: 0
+  // Transient message shown in the footer (e.g. "path copied").
+  property string flashText: ""
+  // Image path queued by Ctrl+L, typed once the overlay is hidden.
+  property string pendingPath: ""
 
   // Host-injected: the shell root and this plugin's manifest, used to read
   // this plugin's own settings from shell.json's `plugins[]`.
@@ -188,7 +203,9 @@ Item {
   function startEditEntry() {
     if (!root.cursorActive || root.selectedIndex < 0 || root.selectedIndex >= displayModel.count) return
     var row = displayModel.get(root.selectedIndex)
-    if (row.entryType === "image") return
+    // An image has no text to edit inline: open the image editor instead
+    // (same flow as Alt+Enter), so Ctrl+E is never a silent no-op.
+    if (row.entryType === "image") { root.openSelected(row); return }
     root.beginEdit("entry", root.selectedIndex, row.historyIndex, row.fullText, row.fullText, "Edit entry")
   }
 
@@ -491,6 +508,44 @@ Item {
     }
   }
 
+  // Type the backing file path of an image entry straight into the focused
+  // window, so it can be handed to an agent (OpenCode/Pi) without a clipboard
+  // round-trip (and without adding a new clipboard-history entry). Text entries
+  // and notes have no file on disk, so the action only applies to images.
+  function typePathIndex(index) {
+    if (index < 0 || index >= displayModel.count) return
+    var row = displayModel.get(index)
+    if (!row) return
+    if (row.entryType !== "image") {
+      root.flash("Path: only for images")
+      return
+    }
+    var path = String(row.path || "")
+    if (path.length === 0) {
+      root.flash("Path unavailable")
+      return
+    }
+    // Close first; the path is typed once the overlay is actually hidden (see
+    // flushPendingPath) so the keystrokes land in the window that regains focus.
+    root.pendingPath = path
+    root.opened = false
+  }
+
+  // Type a queued path after the overlay hides. The short settle delay gives
+  // the compositor time to return focus to the previous window (the same beat
+  // the stock paste helpers use).
+  function flushPendingPath() {
+    if (root.pendingPath.length === 0) return
+    typePathTimer.path = root.pendingPath
+    root.pendingPath = ""
+    typePathTimer.restart()
+  }
+
+  function flash(message) {
+    root.flashText = String(message || "")
+    flashTimer.restart()
+  }
+
   function textIsOpenable(text) {
     var value = String(text || "").trim()
     if (value.length === 0 || value.indexOf("\n") >= 0) return false
@@ -731,9 +786,44 @@ Item {
     }
   }
 
+  // Clears the transient footer message after a moment.
+  Timer {
+    id: flashTimer
+    interval: 2500
+    repeat: false
+    onTriggered: root.flashText = ""
+  }
+
+  // Types a queued image path into the focused window once the overlay hides.
+  Timer {
+    id: typePathTimer
+    property string path: ""
+    interval: 150
+    repeat: false
+    onTriggered: if (path.length > 0 && !root.opened) Quickshell.execDetached(["wtype", "--", path])
+  }
+
+  // Thin scroll hint, shown only while its target Flickable overflows.
+  // Thumb size is proportional to the visible fraction; position maps contentY
+  // over the scrollable range (contentHeight - height), so it reaches the
+  // bottom edge exactly.
+  component ScrollHint: Rectangle {
+    required property Flickable target
+
+    visible: target.visible && target.contentHeight > target.height + 1
+    anchors.right: parent.right
+    width: Style.space(3)
+    radius: width / 2
+    color: Util.alpha(root.foreground, 0.25)
+    height: Math.max(Style.space(24), parent.height * target.height / Math.max(1, target.contentHeight))
+    y: Math.max(0, Math.min(parent.height - height,
+        target.contentY / Math.max(1, target.contentHeight - target.height) * (parent.height - height)))
+  }
+
   PanelWindow {
     id: panel
     visible: root.opened
+    onVisibleChanged: if (!visible) root.flushPendingPath()
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "omarchy-clipboard"
@@ -796,6 +886,9 @@ Item {
             event.accepted = true
           } else if (event.key === Qt.Key_M && (event.modifiers & Qt.ControlModifier)) {
             root.startAnnotation()
+            event.accepted = true
+          } else if (event.key === Qt.Key_L && (event.modifiers & Qt.ControlModifier)) {
+            root.typePathIndex(root.selectedIndex)
             event.accepted = true
           } else if (event.key === Qt.Key_Delete) {
             if (event.modifiers & Qt.ShiftModifier) root.requestClearHistory()
@@ -894,7 +987,7 @@ Item {
                 anchors.bottom: parent.bottom
                 anchors.left: parent.left
                 anchors.right: parent.right
-                text: "Enter saves · Shift+Enter new line · Ctrl+V paste clipboard · Esc cancel"
+                text: "Enter saves · Shift+Enter/Ctrl+Enter new line · Ctrl+V paste clipboard · Esc cancel"
                 color: root.foreground
                 opacity: 0.45
                 font.family: root.fontFamily
@@ -940,9 +1033,15 @@ Item {
                       if (event.key === Qt.Key_Escape) {
                         root.cancelEdit()
                         event.accepted = true
-                      } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                                 && !(event.modifiers & Qt.ShiftModifier)) {
-                        root.commitEdit()
+                      } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        if (event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) {
+                          var selStart = editorField.selectionStart
+                          if (editorField.selectionEnd > selStart)
+                            editorField.remove(selStart, editorField.selectionEnd)
+                          editorField.insert(selStart, "\n")
+                        } else {
+                          root.commitEdit()
+                        }
                         event.accepted = true
                       } else if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) {
                         root.insertClipboardText()
@@ -1213,15 +1312,7 @@ Item {
               }
 
               // Thin scroll hint, shown only while the pane overflows.
-              Rectangle {
-                visible: textPreview.visible && textPreview.contentHeight > textPreview.height + 1
-                anchors.right: parent.right
-                width: Style.space(3)
-                radius: width / 2
-                color: Util.alpha(root.foreground, 0.25)
-                height: Math.max(Style.space(24), parent.height * textPreview.height / Math.max(1, textPreview.contentHeight))
-                y: Math.max(0, Math.min(parent.height - height, textPreview.contentY / Math.max(1, textPreview.contentHeight) * parent.height))
-              }
+              ScrollHint { target: textPreview }
 
               Flickable {
                 id: markdownPreview
@@ -1325,15 +1416,7 @@ Item {
                 }
               }
 
-              Rectangle {
-                visible: markdownPreview.visible && markdownPreview.contentHeight > markdownPreview.height + 1
-                anchors.right: parent.right
-                width: Style.space(3)
-                radius: width / 2
-                color: Util.alpha(root.foreground, 0.25)
-                height: Math.max(Style.space(24), parent.height * markdownPreview.height / Math.max(1, markdownPreview.contentHeight))
-                y: Math.max(0, Math.min(parent.height - height, markdownPreview.contentY / Math.max(1, markdownPreview.contentHeight) * parent.height))
-              }
+              ScrollHint { target: markdownPreview }
 
               Image {
                 visible: parent.activeRow && parent.activeRow.previewImage
@@ -1392,13 +1475,17 @@ Item {
             width: parent.width
             anchors.top: parent.top
             anchors.topMargin: Math.max(0, card.contentBottomInset - root.contentSpacing)
-            text: "↑↓ move · Home/End · Enter paste · Shift+Enter copy · Alt+Enter open · Del delete · Esc close\nCtrl+P pin · Ctrl+N note · Ctrl+E edit · Ctrl+M annotate · Shift+Del clear"
+            text: root.flashText.length > 0
+              ? root.flashText
+              : "↑↓ / PgUp / PgDn move · Home/End · Enter paste · Shift+Enter copy · Alt+Enter open\n"
+                + "Ctrl+P pin · Ctrl+N note · Ctrl+E/F2 edit · Ctrl+M annotate · Ctrl+L path\n"
+                + "Del delete · Shift+Del clear · Esc close"
             color: root.foreground
-            opacity: 0.45
+            opacity: root.flashText.length > 0 ? 0.85 : 0.45
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.NoWrap
+            wrapMode: root.flashText.length > 0 ? Text.WrapAnywhere : Text.NoWrap
             lineHeight: 1.25
           }
         }
