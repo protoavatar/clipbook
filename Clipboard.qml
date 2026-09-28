@@ -33,6 +33,9 @@ Item {
     }
   }
   property string captureScript: root.filePathFromUrl(Qt.resolvedUrl("capture.sh"))
+  // Same for the bounded history reader/writer used instead of reading the
+  // history file straight out of the state dir.
+  property string historyIoScript: root.filePathFromUrl(Qt.resolvedUrl("history-io.sh"))
   // Shares the [menu] surface tokens — themes that style the menu also
   // style the clipboard. Selected-row colors composed in the
   // singleton so consumers drop them straight into Rectangle bindings.
@@ -72,6 +75,11 @@ Item {
   readonly property string externalEditor: root.pluginConfig.externalEditor === undefined
     ? "omawrite" : String(root.pluginConfig.externalEditor)
   readonly property bool markdownPreview: root.pluginConfig.markdownPreview !== false
+  // Notes can contain text pasted from the clipboard, so a link in a note is
+  // untrusted content. Off by default: links render like the rest of the
+  // Markdown, but do not launch a browser when clicked. Set
+  // `markdownLinks: true` to opt back in.
+  readonly property bool markdownLinks: root.pluginConfig.markdownLinks === true
   readonly property bool showCategoryColors: root.pluginConfig.showCategoryColors !== false
 
   readonly property string runtimeDir: {
@@ -79,6 +87,14 @@ Item {
     if (base.length === 0) base = String(Quickshell.env("HOME") || "/tmp") + "/.cache"
     return base + "/protoavatar.clipbook"
   }
+  // The history file in the state dir is only reached through history-io.sh,
+  // which refuses symlinks and non-regular files and copies at most this many
+  // bytes. The plugin itself only ever reads these private caches.
+  readonly property int historyMaxBytes: 32 * 1024 * 1024
+  readonly property string historyCachePath: root.runtimeDir + "/history-cache.json"
+  readonly property string historyStampPath: root.runtimeDir + "/history-stamp"
+  readonly property string historyBackupCachePath: root.runtimeDir + "/history-cache.bak.json"
+  readonly property string historyBackupStampPath: root.runtimeDir + "/history-stamp.bak"
   property string externalEditPath: ""
   property int externalEditHistoryIndex: -1
   property string externalEditSeed: ""
@@ -163,6 +179,7 @@ Item {
       + " limit=" + root.historyLimit
       + " editor=" + (root.externalEditor.length > 0 ? root.externalEditor : "(system)")
       + " md=" + root.markdownPreview
+      + " links=" + root.markdownLinks
       + " colors=" + root.showCategoryColors
       + " first=" + (first ? (first.category + ":" + String(first.previewText).slice(0, 24)) : "none")
   }
@@ -315,7 +332,7 @@ Item {
     // A corrupt main file must not blank the UI (or get persisted as empty)
     // before the sidecar is checked. Keep the in-memory history until then.
     if (corrupt) {
-      historyBackupFile.reload()
+      root.refreshHistoryCache(true)
       return
     }
     root.history = parsed
@@ -342,9 +359,21 @@ Item {
     // Keep the previous content in a sidecar so a bad write never loses
     // everything: `clipboard-history.json.bak` always holds the last state.
     if (root.lastSavedJson.length > 0 && root.lastSavedJson !== next)
-      historyBackupFile.setText(root.lastSavedJson)
-    historyFile.setText(next)
+      historyBackupWriter.setText(root.lastSavedJson)
+    historyWriter.setText(next)
     root.lastSavedJson = next
+  }
+
+  // Re-read the history through history-io.sh. The copy is bounded and never
+  // follows a symlink, and the FileViews above only ever see that copy.
+  function refreshHistoryCache(force) {
+    if (historyReadProc.running) return
+    var command = [root.historyIoScript, "read", String(root.historyMaxBytes),
+      root.historyPath, root.historyCachePath, root.historyStampPath,
+      root.historyPath + ".bak", root.historyBackupCachePath, root.historyBackupStampPath]
+    if (force === true) command.push("--force")
+    historyReadProc.command = command
+    historyReadProc.running = true
   }
 
   function addClipboardEntry(entry) {
@@ -646,24 +675,41 @@ Item {
 
   FileView {
     id: historyFile
-    path: root.historyPath
+    // Private cache written by history-io.sh, never the state file itself.
+    path: root.historyCachePath
     watchChanges: true
-    atomicWrites: true
     printErrors: false
     onLoaded: root.loadHistory(text())
-    // A transient read failure must not wipe the in-memory history: on first
-    // run it is already empty, and on any later failure keeping what we have
-    // is strictly safer than resetting to [].
     onFileChanged: reload()
   }
 
   // Sidecar copy of the previous history, written just before each save.
   FileView {
     id: historyBackupFile
-    path: root.historyPath + ".bak"
-    atomicWrites: true
+    path: root.historyBackupCachePath
     printErrors: false
     onLoaded: root.loadBackup(text())
+  }
+
+  // Write-only view of the state file. `preload: false` is the point: the
+  // plugin never reads this path through QML, so a symlinked or oversized file
+  // there cannot pull its content into the shell. Reads go through
+  // history-io.sh into the private caches above.
+  FileView {
+    id: historyWriter
+    path: root.historyPath
+    preload: false
+    atomicWrites: true
+    printErrors: false
+  }
+
+  // Write-only view of the sidecar, same reasoning.
+  FileView {
+    id: historyBackupWriter
+    path: root.historyPath + ".bak"
+    preload: false
+    atomicWrites: true
+    printErrors: false
   }
 
   FileView {
@@ -687,9 +733,31 @@ Item {
   // own. The pdeathsig on the watchers makes the kernel kill them whenever
   // the shell exits, however it exits, so no further lifecycle management.
   Process {
+    id: historyReadProc
+    // The cache may not exist yet on the first read, and a file appearing is
+    // not a change to an existing one, so ask the FileViews to load explicitly.
+    onExited: {
+      historyFile.reload()
+      historyBackupFile.reload()
+    }
+  }
+
+  // The history file lives in a shared state dir and can be written by other
+  // tools too, so keep an eye on it. history-io.sh skips the copy entirely
+  // when size and mtime are unchanged, so an idle poll costs one stat pair.
+  Timer {
+    id: historyPollTimer
+    interval: 2000
+    repeat: true
+    running: true
+    onTriggered: root.refreshHistoryCache(false)
+  }
+
+  Process {
     id: initProc
     command: ["pkill", "-f", "wl-paste .*--watch .*clipbook/capture\\.sh"]
     onExited: {
+      root.refreshHistoryCache(true)
       currentProc.running = true
       textWatchProc.running = true
       imageWatchProc.running = true
@@ -1350,7 +1418,13 @@ Item {
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.title
                         wrapMode: Text.Wrap
-                        onLinkActivated: function(link) { Quickshell.execDetached(["omarchy-launch-browser", link]) }
+                        onLinkActivated: function(link) {
+                          // Untrusted by default: a note can hold pasted
+                          // clipboard text, so only open links when the user
+                          // opted in with `markdownLinks: true`.
+                          if (!root.markdownLinks) return
+                          Quickshell.execDetached(["omarchy-launch-browser", link])
+                        }
                       }
 
                       Rectangle {
@@ -1382,7 +1456,13 @@ Item {
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.title
                           wrapMode: Text.Wrap
-                          onLinkActivated: function(link) { Quickshell.execDetached(["omarchy-launch-browser", link]) }
+                          onLinkActivated: function(link) {
+                          // Untrusted by default: a note can hold pasted
+                          // clipboard text, so only open links when the user
+                          // opted in with `markdownLinks: true`.
+                          if (!root.markdownLinks) return
+                          Quickshell.execDetached(["omarchy-launch-browser", link])
+                        }
                         }
                       }
 

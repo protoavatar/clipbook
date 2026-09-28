@@ -65,6 +65,7 @@ Clipbook reads its settings from its entry in `~/.config/omarchy/shell.json`
       "historyLimit": 500,
       "externalEditor": "omawrite",
       "markdownPreview": true,
+      "markdownLinks": false,
       "showCategoryColors": true
     }
   ]
@@ -76,6 +77,7 @@ Clipbook reads its settings from its entry in `~/.config/omarchy/shell.json`
 | `historyLimit` | `500` | max unpinned entries kept (pins and notes never age out) |
 | `externalEditor` | `"omawrite"` | editor opened by `Alt+Enter` on text/notes; empty uses the system default |
 | `markdownPreview` | `true` | render Markdown for notes in the preview pane |
+| `markdownLinks` | `false` | let a clicked link in a note open the browser. A note can hold text pasted from the clipboard, so a link in a note is untrusted content; keep this off unless you accept that |
 | `showCategoryColors` | `true` | colour rows by content type |
 
 ## Data
@@ -105,6 +107,8 @@ omarchy plugin remove protoavatar.clipbook
   path to an agent. Ships with Omarchy.
 - `bash` — the plugin runs small shell helpers (`mkdir`, `cmp`, `cat`) for image
   editing.
+- coreutils `dd` / `stat` / `cmp` — used by `history-io.sh` for the bounded
+  history read (see Security & Privacy).
 - `tensaku` (`tensaku-edit`) — image editor, used by `Alt+Enter` on an image.
   Ships with Omarchy.
 - `omawrite` — default external editor for `Alt+Enter` on text/notes. Ships with
@@ -129,6 +133,16 @@ Clipbook keeps everything on your machine, like the built-in manager:
   while `CLIPBOARD_STATE=sensitive`.
 - **Remote images in notes are stripped** before rendering, so Qt's rich-text
   engine never fetches anything.
+- **Links in notes are inert by default.** A note can contain text pasted from
+  the clipboard, so a link inside it is untrusted. `markdownLinks` is `false`, so
+  clicking a link in a note does nothing; set it to `true` only if you want
+  clicked links to open the browser.
+- **Bounded, no-follow history reads.** The shell never reads
+  `clipboard-history.json` through QML. `history-io.sh` copies it into a private
+  cache under the plugin's runtime dir with `O_NOFOLLOW`, refusing symlinks and
+  any non-regular file, and caps the copy at 32 MiB. Anything that replaces that
+  path cannot make the shell read an arbitrary or unbounded file; Clipbook only
+  parses the bounded copy.
 - **No privileged operations.** No installer, no privilege escalation, no remote
   build. It only spawns local tools: `wl-paste`/`wl-copy`, `tensaku` for image
   editing, and the external editor you configure.
