@@ -19,6 +19,11 @@
 
 set -u
 
+# The cache holds a full copy of the clipboard history, so it must not be
+# world-readable: a normal 022 umask would leave the copy at 0644, and any other
+# local user could read it. Everything this script creates is owner-only.
+umask 077
+
 MAX_BLOCK=65536
 
 cmd="${1:-}"
@@ -29,6 +34,7 @@ copy_bounded() {
   local tmp="$dst.tmp.$$"
   if dd if="$src" of="$tmp" bs="$MAX_BLOCK" count="$blocks" \
         iflag=nofollow,fullblock status=none 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null || true
     # An unchanged copy must not touch the cache, so the FileView watching it
     # does not reload (and re-parse) on every poll.
     if [ -f "$dst" ] && cmp -s "$tmp" "$dst"; then
@@ -47,6 +53,9 @@ read_pair() {
   local size mtime current previous
 
   mkdir -p "$(dirname -- "$cache")" "$(dirname -- "$stamp")" 2>/dev/null || return 0
+  # Owner-only directory: the cache is a full copy of the clipboard history.
+  chmod 700 "$(dirname -- "$cache")" 2>/dev/null || true
+  chmod 700 "$(dirname -- "$stamp")" 2>/dev/null || true
 
   # Regular file only: no symlink, no directory, no device, no fifo.
   [ -L "$src" ] && { rm -f "$cache"; return 0; }
@@ -61,7 +70,7 @@ read_pair() {
   if [ -z "$force" ] && [ "$current" = "$(cat -- "$stamp" 2>/dev/null || true)" ]; then
     return 0
   fi
-  printf '%s' "$current" >"$stamp" 2>/dev/null || true
+  printf '%s' "$current" >"$stamp" 2>/dev/null && chmod 600 "$stamp" 2>/dev/null || true
 
   # Oversized input: drop the cache instead of truncating into a corrupt file
   # that would look like a broken history.

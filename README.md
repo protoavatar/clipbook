@@ -142,7 +142,9 @@ Clipbook keeps everything on your machine, like the built-in manager:
   cache under the plugin's runtime dir with `O_NOFOLLOW`, refusing symlinks and
   any non-regular file, and caps the copy at 32 MiB. Anything that replaces that
   path cannot make the shell read an arbitrary or unbounded file; Clipbook only
-  parses the bounded copy.
+  parses the bounded copy. The cache lives in a `0700` directory and its files
+  are `0600`, so the copy of your clipboard history is not readable by other
+  local users.
 - **No privileged operations.** No installer, no privilege escalation, no remote
   build. It only spawns local tools: `wl-paste`/`wl-copy`, `tensaku` for image
   editing, and the external editor you configure.
